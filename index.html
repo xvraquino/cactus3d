@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Cactus 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  canvas { display: block; touch-action: none; }
+  #ui { position: fixed; left: 0; right: 0; bottom: 18px; display: flex; gap: 10px; justify-content: center; z-index: 2; }
+  button { background: #111; color: #7dff4f; border: 2px solid #7dff4f; border-radius: 22px; padding: 10px 18px; font-size: 15px; font-weight: 600; }
+  button:active { background: #7dff4f; color: #000; }
+  #hint { position: fixed; top: 14px; width: 100%; text-align: center; color: #f7d64a; font-size: 14px; opacity: .85; z-index: 2; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.js", "three/addons/": "./addons/" } }
+</script>
+</head>
+<body>
+<div id="hint">Drag to rotate · pinch to zoom</div>
+<div id="ui">
+  <button id="spin">Pause spin</button>
+  <button id="stl">Download STL</button>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/OrbitControls.js';
+import { STLExporter } from 'three/addons/STLExporter.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+scene.fog = new THREE.Fog(0x000000, 18, 40);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 4.5, innerWidth < innerHeight ? 15 : 11);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 3.6, 0);
+controls.enableDamping = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 1.6;
+controls.minDistance = 4;
+controls.maxDistance = 25;
+controls.maxPolarAngle = Math.PI * 0.62;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(4, 8, 6); scene.add(key);
+const rim = new THREE.DirectionalLight(0xbfc8ff, 0.8); rim.position.set(-6, 5, -6); scene.add(rim);
+
+// ---------- Ribbed tube (cactus body / arms) ----------
+const GREEN = new THREE.Color(0x5df23a), DARK = new THREE.Color(0x0a1f08);
+function ribbedTube(pts, R, { ribs = 10, segs = 160, radial = 140, capStart = false } = {}) {
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  const L = curve.getLength();
+  const frames = curve.computeFrenetFrames(segs, false);
+  const capF = Math.min(0.45, R / L);
+  const pos = [], col = [], idx = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    let k = 1;
+    if (t > 1 - capF) { const u = (t - (1 - capF)) / capF; k = Math.sqrt(Math.max(0, 1 - u * u)); }
+    if (capStart && t < capF) { const u = 1 - t / capF; k = Math.sqrt(Math.max(0, 1 - u * u)); }
+    const P = curve.getPointAt(t), N = frames.normals[i], B = frames.binormals[i];
+    for (let j = 0; j <= radial; j++) {
+      const th = (j / radial) * Math.PI * 2;
+      const rib = Math.cos(ribs * th);
+      const r = R * k * (1 + 0.075 * rib);
+      const c = Math.cos(th), s = Math.sin(th);
+      pos.push(P.x + r * (c * N.x + s * B.x), P.y + r * (c * N.y + s * B.y), P.z + r * (c * N.z + s * B.z));
+      // dark grooves like the ink lines in the drawing
+      const g = rib < -0.55 ? 0 : (rib < -0.35 ? (rib + 0.55) / 0.2 : 1);
+      const cc = DARK.clone().lerp(GREEN, g);
+      col.push(cc.r, cc.g, cc.b);
+    }
+  }
+  const row = radial + 1;
+  for (let i = 0; i < segs; i++) for (let j = 0; j < radial; j++) {
+    const a = i * row + j, b = a + row;
+    idx.push(a, b, a + 1, b, b + 1, a + 1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const cactusMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, emissive: 0x1c5a10, emissiveIntensity: 0.55 });
+const printable = new THREE.Group(); scene.add(printable);
+
+const trunk = new THREE.Mesh(ribbedTube([new THREE.Vector3(0, -0.2, 0), new THREE.Vector3(0, 3.5, 0), new THREE.Vector3(0, 7.2, 0)], 0.62, { ribs: 12 }), cactusMat);
+printable.add(trunk);
+
+function arm(side, h, out, top) {
+  const s = side;
+  return new THREE.Mesh(ribbedTube([
+    new THREE.Vector3(0, h, 0),
+    new THREE.Vector3(s * 0.8, h - 0.15, 0),
+    new THREE.Vector3(s * (out - 0.15), h + 0.25, 0),
+    new THREE.Vector3(s * out, h + 1.0, 0),
+    new THREE.Vector3(s * out, top, 0),
+  ], 0.4, { ribs: 9, segs: 140, radial: 110 }), cactusMat);
+}
+printable.add(arm(-1, 2.6, 1.85, 5.6));
+printable.add(arm(1, 3.0, 1.75, 5.3));
+
+// Base stand (part of the printable model)
+const base = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 2.8, 0.4, 64), new THREE.MeshStandardMaterial({ color: 0x2b1d14, roughness: 0.9 }));
+base.position.y = -0.2;
+printable.add(base);
+
+// ---------- Triangle halo ----------
+const triShape = (sz) => { const s = new THREE.Shape(); s.moveTo(0, sz); s.lineTo(-sz * 0.62, -sz * 0.45); s.lineTo(sz * 0.62, -sz * 0.45); s.closePath(); return s; };
+const orangeGeo = new THREE.ExtrudeGeometry(triShape(0.36), { depth: 0.16, bevelEnabled: false }); orangeGeo.translate(0, 0, -0.08);
+const yellowGeo = new THREE.ExtrudeGeometry(triShape(0.5), { depth: 0.12, bevelEnabled: false }); yellowGeo.translate(0, 0.02, -0.06);
+const orangeMat = new THREE.MeshStandardMaterial({ color: 0xf2603a, emissive: 0xc0381a, emissiveIntensity: 0.6, roughness: 0.5 });
+const yellowMat = new THREE.MeshStandardMaterial({ color: 0xf7d64a, emissive: 0xb08a10, emissiveIntensity: 0.6, roughness: 0.5 });
+
+const halo = new THREE.Group(); scene.add(halo);
+const RA = 3.0, CY = 4.6, SIDE_BOTTOM = 0.7;
+const sideLen = CY - SIDE_BOTTOM, arcLen = Math.PI * RA, total = arcLen + 2 * sideLen;
+const COUNT = 24, tris = [];
+for (let i = 0; i < COUNT; i++) {
+  const d = (i + 0.5) / COUNT * total;
+  let x, y, nx, ny;
+  if (d < sideLen) { x = -RA; y = SIDE_BOTTOM + d; nx = -1; ny = 0; }
+  else if (d < sideLen + arcLen) { const a = Math.PI - (d - sideLen) / RA; x = RA * Math.cos(a); y = CY + RA * Math.sin(a); nx = Math.cos(a); ny = Math.sin(a); }
+  else { x = RA; y = CY - (d - sideLen - arcLen); nx = 1; ny = 0; }
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(yellowGeo, yellowMat), new THREE.Mesh(orangeGeo, orangeMat));
+  g.position.set(x, y, 0);
+  g.rotation.z = Math.atan2(ny, nx) - Math.PI / 2; // apex points outward
+  g.userData = { phase: i * 0.7, baseX: x, baseY: y, nx, ny };
+  halo.add(g); tris.push(g);
+}
+
+// ---------- Moon ----------
+const moon = new THREE.Mesh(new THREE.SphereGeometry(1.1, 48, 32), new THREE.MeshStandardMaterial({ color: 0xdcdcff, emissive: 0xa8a8e0, emissiveIntensity: 0.8 }));
+moon.position.set(-6.5, 10, -7); scene.add(moon);
+const moonLight = new THREE.PointLight(0xc8c8ff, 30, 30); moonLight.position.copy(moon.position); scene.add(moonLight);
+
+// ---------- Storm clouds ----------
+const cloudMat = new THREE.MeshStandardMaterial({ color: 0x3a4250, transparent: true, opacity: 0.75, roughness: 1 });
+function cloud(x, y, z, s) {
+  const g = new THREE.Group();
+  [[0, 0, 0, 1], [1.1, -0.1, 0.2, 0.8], [-1.1, -0.15, 0, 0.75], [0.5, 0.45, -0.2, 0.7], [-0.5, 0.35, 0.3, 0.65], [1.9, -0.25, 0, 0.55], [-1.8, -0.3, 0.1, 0.5]]
+    .forEach(([a, b, c, r]) => { const m = new THREE.Mesh(new THREE.SphereGeometry(r, 24, 16), cloudMat); m.position.set(a, b, c); g.add(m); });
+  g.position.set(x, y, z); g.scale.setScalar(s); scene.add(g); return g;
+}
+const clouds = [cloud(-4.5, 6.5, -4, 1.1), cloud(4.8, 7.3, -3.5, 1.2), cloud(0.5, 9.5, -8, 1.4)];
+
+// ---------- Tumbleweeds (scribble balls) ----------
+function tumbleweed(x, z, r) {
+  const g = new THREE.Group();
+  const mat = new THREE.LineBasicMaterial({ color: 0x8a6a52 });
+  for (let k = 0; k < 28; k++) {
+    const pts = [];
+    for (let p = 0; p < 6; p++) pts.push(new THREE.Vector3().randomDirection().multiplyScalar(r * (0.55 + Math.random() * 0.45)));
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(new THREE.CatmullRomCurve3(pts, true).getPoints(60)), mat));
+  }
+  g.position.set(x, r - 0.4, z); scene.add(g); return g;
+}
+const weeds = [tumbleweed(-3.4, 1.8, 0.9), tumbleweed(3.6, -1.2, 0.75), tumbleweed(-1.5, -3.5, 0.6)];
+
+// ---------- Stars + ground ----------
+const starPos = [];
+for (let i = 0; i < 700; i++) { const v = new THREE.Vector3().randomDirection().multiplyScalar(30 + Math.random() * 10); if (v.y > -2) starPos.push(v.x, Math.abs(v.y), v.z); }
+const starGeo = new THREE.BufferGeometry(); starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.08 })));
+const ground = new THREE.Mesh(new THREE.CircleGeometry(30, 64), new THREE.MeshStandardMaterial({ color: 0x0b0b10, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = -0.41; scene.add(ground);
+
+// ---------- Animate ----------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const t = clock.getElapsedTime();
+  tris.forEach(g => {
+    const { phase, baseX, baseY, nx, ny } = g.userData;
+    const pulse = 0.12 * Math.sin(t * 2 + phase);
+    g.position.set(baseX + nx * pulse, baseY + ny * pulse, 0);
+    g.rotateOnAxis(new THREE.Vector3(0, 1, 0), 0.02);
+  });
+  clouds.forEach((c, i) => c.position.x += Math.sin(t * 0.3 + i) * 0.004);
+  weeds.forEach((w, i) => { w.rotation.y = t * (0.3 + i * 0.1); w.rotation.x = t * 0.2; });
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+document.getElementById('spin').onclick = (e) => {
+  controls.autoRotate = !controls.autoRotate;
+  e.target.textContent = controls.autoRotate ? 'Pause spin' : 'Spin';
+};
+
+// Export cactus + base as STL (~120 mm tall, Z up)
+document.getElementById('stl').onclick = () => {
+  const wrap = new THREE.Group();
+  const copy = printable.clone();
+  copy.position.y = 0.4;
+  wrap.add(copy);
+  wrap.rotation.x = Math.PI / 2;
+  wrap.scale.setScalar(120 / 7.6);
+  wrap.updateMatrixWorld(true);
+  const data = new STLExporter().parse(wrap, { binary: true });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([data], { type: 'model/stl' }));
+  a.download = 'cactus.stl';
+  a.click();
+};
+</script>
+</body>
+</html>
